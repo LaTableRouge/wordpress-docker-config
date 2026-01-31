@@ -128,7 +128,8 @@ if [ -d "$THEME_DIR" ]; then
     setup_husky "$THEME_DIR"
 fi
 
-# Configure git user (if environment variables are set)
+# Configure git (editor + user if environment variables are set)
+git config --global core.editor "vim"
 if [ -n "$GIT_USER_NAME" ] && [ -n "$GIT_USER_EMAIL" ]; then
     git config --global user.name "$GIT_USER_NAME"
     git config --global user.email "$GIT_USER_EMAIL"

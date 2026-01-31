@@ -23,6 +23,7 @@ RUN apt-get update -qq && \
     libonig-dev \
     default-mysql-client \
     build-essential \
+    vim \
     && apt-get clean && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Install Node.js and npm
@@ -47,6 +48,10 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg && \
     intl \
     mbstring
 
+# Install Xdebug
+RUN pecl install xdebug && \
+    docker-php-ext-enable xdebug
+
 # Install WP-CLI globally via Composer
 RUN composer global require wp-cli/wp-cli-bundle
 
@@ -57,6 +62,7 @@ RUN wp package install wp-cli/profile-command:@stable --allow-root
 
 # Copy configuration files
 COPY docker/conf/php.ini /usr/local/etc/php/conf.d/app.ini
+COPY docker/conf/xdebug.ini /usr/local/etc/php/conf.d/xdebug.ini
 COPY docker/conf/vhost.conf /etc/apache2/sites-available/000-default.conf
 COPY docker/conf/apache.conf /etc/apache2/conf-available/z-app.conf
 COPY docker/conf/entrypoint.sh /usr/local/bin/entrypoint.sh
