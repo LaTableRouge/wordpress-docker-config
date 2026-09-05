@@ -1,5 +1,7 @@
 FROM php:8.3-apache
 
+ARG INSTALL_XDEBUG=false
+
 ENV COMPOSER_ALLOW_SUPERUSER=1
 
 WORKDIR /app
@@ -21,6 +23,7 @@ RUN apt-get update -qq && \
     libzip-dev \
     libicu-dev \
     libonig-dev \
+    libmagickwand-dev \
     default-mysql-client \
     build-essential \
     vim \
@@ -42,39 +45,36 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg && \
     opcache \
     pdo_mysql \
     mysqli \
-    soap \
     zip \
     gd \
     intl \
     mbstring
 
-# Install Xdebug
-RUN pecl install xdebug && \
-    docker-php-ext-enable xdebug
+# APCu (php.ini already enables apc.enable_cli) and Imagick (WP image editor)
+RUN pecl install apcu && \
+    printf '\n' | pecl install imagick && \
+    docker-php-ext-enable apcu imagick
+
+# Xdebug (INSTALL_XDEBUG=true in .env, then rebuild)
+RUN if [ "$INSTALL_XDEBUG" = "true" ]; then \
+      pecl install xdebug && \
+      docker-php-ext-enable xdebug; \
+    fi
 
 # Install WP-CLI globally via Composer
 RUN composer global require wp-cli/wp-cli-bundle
 
 ENV PATH="/root/.composer/vendor/bin:$PATH"
 
-# Install WP-CLI Profile Command
-RUN wp package install wp-cli/profile-command:@stable --allow-root
-
-# Copy configuration files
-COPY docker/conf/php.ini /usr/local/etc/php/conf.d/app.ini
-COPY docker/conf/xdebug.ini /usr/local/etc/php/conf.d/xdebug.ini
-COPY docker/conf/vhost.conf /etc/apache2/sites-available/000-default.conf
-COPY docker/conf/apache.conf /etc/apache2/conf-available/z-app.conf
 COPY docker/conf/entrypoint.sh /usr/local/bin/entrypoint.sh
 
-# Make entrypoint executable
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
-# Enable Apache modules and configuration
-RUN a2enmod rewrite remoteip && \
+# php.ini / vhost / apache.conf are bind-mounted by compose.
+# Placeholder so a2enconf succeeds at build time.
+RUN chmod +x /usr/local/bin/entrypoint.sh && \
+    touch /etc/apache2/conf-available/z-app.conf && \
+    a2enmod rewrite remoteip && \
     a2enconf z-app && \
     a2ensite 000-default
 
-# Set entrypoint
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["apache2-foreground"]

@@ -1,14 +1,12 @@
 #!/bin/bash
 set -e
 
-# Helper function to create symlink (removes existing target first)
 create_symlink() {
     local source="$1"
     local target="$2"
     local description="$3"
-    
+
     if [ -e "$source" ]; then
-        # Remove existing target if it exists
         if [ -e "$target" ] || [ -L "$target" ]; then
             rm -rf "$target" 2>/dev/null || unlink "$target" 2>/dev/null || true
         fi
@@ -17,124 +15,189 @@ create_symlink() {
     fi
 }
 
-# Helper function to check if directory is empty
 is_dir_empty() {
     local dir="$1"
     [ ! -d "$dir" ] || [ -z "$(ls -A "$dir" 2>/dev/null)" ]
 }
 
-# Helper function to install npm dependencies
 setup_npm() {
     local dir="$1"
+    local label="${2:-project}"
     local node_modules_dir="$dir/node_modules"
     local bin_dir="$node_modules_dir/.bin"
-    
+
     if [ ! -f "$dir/package.json" ]; then
         return 0
     fi
-    
-    echo "Checking npm setup for theme..."
+
+    echo "Checking npm setup for $label..."
     cd "$dir"
-    
+
     if is_dir_empty "$node_modules_dir"; then
-        echo "Installing npm dependencies in named volume..."
+        echo "Installing npm dependencies for $label..."
+        npm install
+    elif [ -f "$dir/package-lock.json" ] && [ -f "$node_modules_dir/.package-lock.json" ] \
+        && [ "$dir/package-lock.json" -nt "$node_modules_dir/.package-lock.json" ]; then
+        echo "package-lock.json is newer than node_modules for $label — updating..."
         npm install
     else
-        echo "node_modules already exists in named volume"
+        echo "node_modules already up to date for $label"
     fi
-    
-    # Fix permissions for executables
+
     if [ -d "$bin_dir" ]; then
-        echo "Fixing permissions for node_modules/.bin executables..."
         find "$bin_dir" -type f -exec chmod +x {} \; 2>/dev/null || true
-        
-        # Verify common executables
-        for bin_file in vite wp-scripts; do
-            if [ -f "$bin_dir/$bin_file" ]; then
-                chmod +x "$bin_dir/$bin_file" 2>/dev/null || true
-                if [ -x "$bin_dir/$bin_file" ]; then
-                    echo "✓ $bin_file is executable"
-                else
-                    echo "⚠ Warning: $bin_file is not executable (chmod may not work on this filesystem)"
-                fi
-            fi
-        done
     fi
 }
 
-# Helper function to install composer dependencies
 setup_composer() {
     local dir="$1"
+    local label="${2:-project}"
     local vendor_dir="$dir/vendor"
-    
+
     if [ ! -f "$dir/composer.json" ]; then
         return 0
     fi
-    
-    echo "Checking composer setup for theme..."
+
+    echo "Checking composer setup for $label..."
     cd "$dir"
-    
+
     if is_dir_empty "$vendor_dir"; then
-        echo "Installing composer dependencies in named volume..."
+        echo "Installing composer dependencies for $label..."
+        composer install
+    elif [ -f "$dir/composer.lock" ] && [ -f "$vendor_dir/composer/installed.json" ] \
+        && [ "$dir/composer.lock" -nt "$vendor_dir/composer/installed.json" ]; then
+        echo "composer.lock is newer than vendor for $label — updating..."
         composer install
     else
-        echo "vendor already exists in named volume"
+        echo "vendor already up to date for $label"
     fi
 }
 
-# Helper function to fix husky hooks permissions
 setup_husky() {
     local dir="$1"
+    local label="${2:-project}"
     local husky_dir="$dir/.husky"
-    
+
     if [ ! -d "$husky_dir" ]; then
         return 0
     fi
-    
-    echo "Fixing permissions for husky hooks..."
+
+    echo "Fixing permissions for husky hooks ($label)..."
     find "$husky_dir" -type f -exec chmod +x {} \; 2>/dev/null || true
     if [ -d "$husky_dir/_" ]; then
         find "$husky_dir/_" -type f -exec chmod +x {} \; 2>/dev/null || true
     fi
-    echo "✓ Husky hooks permissions fixed"
 }
 
-# Get theme name from environment variable, or extract from mounted volume path
-if [ -z "$THEME_NAME" ]; then
-    # Try to extract theme name from mounted volumes by checking /app/wp-content/themes
-    # Find the first directory that's not a standard WordPress theme
-    for theme_dir in /app/wp-content/themes/*/; do
-        theme_name=$(basename "$theme_dir")
-        # Skip default WordPress themes
-        if [[ ! "$theme_name" =~ ^(twentytwenty|simppple|index\.php)$ ]]; then
-            THEME_NAME="$theme_name"
-            break
+setup_project() {
+    local dir="$1"
+    local label="$2"
+
+    if [ ! -d "$dir" ]; then
+        return 0
+    fi
+
+    setup_npm "$dir" "$label"
+    setup_composer "$dir" "$label"
+    setup_husky "$dir" "$label"
+}
+
+wordpress_is_installed() {
+    [ -f /app/wp-load.php ] && [ -f /app/wp-includes/version.php ]
+}
+
+install_wordpress() {
+    if [ "${SKIP_WP_DOWNLOAD:-}" = "1" ] || [ "${SKIP_WP_DOWNLOAD:-}" = "true" ]; then
+        echo "SKIP_WP_DOWNLOAD is set — not fetching WordPress"
+        return 0
+    fi
+
+    if wordpress_is_installed; then
+        echo "WordPress already present — skipping download"
+        return 0
+    fi
+
+    local version="${WP_VERSION:-6.8.2}"
+    local url
+    if [ "$version" = "latest" ]; then
+        url="https://wordpress.org/latest.zip"
+    else
+        url="https://wordpress.org/wordpress-${version}.zip"
+    fi
+
+    echo "No WordPress install found. Downloading ${url}..."
+    local tmp
+    tmp=$(mktemp -d)
+
+    if ! curl -fL --retry 3 --retry-delay 2 "$url" -o "$tmp/wordpress.zip"; then
+        echo "⚠ Failed to download WordPress from $url"
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    if ! unzip -q "$tmp/wordpress.zip" -d "$tmp"; then
+        echo "⚠ Failed to unzip WordPress archive"
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    if [ ! -d "$tmp/wordpress" ]; then
+        echo "⚠ Unexpected zip layout (missing wordpress/ directory)"
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    echo "Extracting WordPress into /app (existing files are kept)..."
+    cp -an "$tmp/wordpress/." /app/
+    rm -rf "$tmp"
+
+    if wordpress_is_installed; then
+        echo "✓ WordPress ${version} is in place"
+    else
+        echo "⚠ WordPress extract finished but wp-load.php is missing"
+        return 1
+    fi
+}
+
+install_wordpress || echo "⚠ WordPress download failed — restart the container when the network is available"
+
+if [ -n "$THEME_NAME" ] && [ "$THEME_NAME" != "unused-theme" ]; then
+    echo "Using theme: $THEME_NAME"
+    THEME_DIR="/app/wp-content/themes/$THEME_NAME"
+
+    if [ ! -d "$THEME_DIR" ]; then
+        echo "⚠ Theme directory not found: $THEME_DIR"
+    else
+        create_symlink "$THEME_DIR/wp-config.php" "/app/wp-config.php" "wp-config.php"
+        create_symlink "$THEME_DIR/uploads" "/app/wp-content/uploads" "uploads directory"
+        setup_project "$THEME_DIR" "theme"
+    fi
+else
+    echo "No THEME_NAME set — standalone mode (no theme symlinks)"
+fi
+
+setup_project /app "project root"
+
+if [ -d /app/wp-content/plugins ]; then
+    for plugin_dir in /app/wp-content/plugins/*/; do
+        [ -d "$plugin_dir" ] || continue
+        plugin_name=$(basename "$plugin_dir")
+        setup_husky "$plugin_dir" "plugin $plugin_name"
+
+        if [ -d "$plugin_dir/.git" ]; then
+            setup_npm "$plugin_dir" "plugin $plugin_name" || echo "⚠ Warning: npm setup failed for plugin $plugin_name"
+            setup_composer "$plugin_dir" "plugin $plugin_name" || echo "⚠ Warning: composer setup failed for plugin $plugin_name"
         fi
     done
 fi
 
-echo "Using theme: $THEME_NAME"
-
-THEME_DIR="/app/wp-content/themes/$THEME_NAME"
-
-# Create symlinks for theme files
-create_symlink "$THEME_DIR/wp-config.php" "/app/wp-config.php" "wp-config.php"
-create_symlink "$THEME_DIR/uploads" "/app/wp-content/uploads" "uploads directory"
-
-# Setup theme dependencies (if theme directory exists)
-if [ -d "$THEME_DIR" ]; then
-    setup_npm "$THEME_DIR"
-    setup_composer "$THEME_DIR"
-    setup_husky "$THEME_DIR"
+if command -v git >/dev/null 2>&1; then
+    git config --global core.editor "vim"
+    if [ -n "$GIT_USER_NAME" ] && [ -n "$GIT_USER_EMAIL" ]; then
+        git config --global user.name "$GIT_USER_NAME"
+        git config --global user.email "$GIT_USER_EMAIL"
+        echo "Git configured: $GIT_USER_NAME <$GIT_USER_EMAIL>"
+    fi
 fi
 
-# Configure git (editor + user if environment variables are set)
-git config --global core.editor "vim"
-if [ -n "$GIT_USER_NAME" ] && [ -n "$GIT_USER_EMAIL" ]; then
-    git config --global user.name "$GIT_USER_NAME"
-    git config --global user.email "$GIT_USER_EMAIL"
-    echo "Git configured: $GIT_USER_NAME <$GIT_USER_EMAIL>"
-fi
-
-# Execute the original command
 exec "$@"

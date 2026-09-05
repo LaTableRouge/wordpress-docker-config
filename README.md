@@ -1,275 +1,269 @@
 # WordPress Docker Development Environment
 
-A Docker-based development environment for WordPress with automatic theme integration, dependency management, and git support.
+Docker stack for local WordPress: PHP 8.3, Apache, Node.js, Composer, WP-CLI, Traefik, and MariaDB (via [Traefik Dockerized](https://github.com/LaTableRouge/dockerized)).
+
+One `docker-compose.yml`. Behaviour is switched from `.env`:
+
+| Mode            | When                                                       | `.env`                            |
+| --------------- | ---------------------------------------------------------- | --------------------------------- |
+| **Standalone**  | The repo _is_ the WordPress site                           | Leave `THEME_NAME` unset          |
+| **Shared core** | One WordPress install, theme mounted from a sibling folder | Set `THEME_NAME` and `THEME_PATH` |
+
+If the project folder has no WordPress (`wp-load.php` missing), the first container start downloads the official zip from wordpress.org and extracts it **without overwriting** existing files (`docker/`, `.env`, an existing `wp-content`, …).
 
 ## Prerequisites
 
-- Docker and Docker Compose installed
-- **Recommended**: [Traefik Dockerized](https://github.com/LaTableRouge/dockerized) setup for reverse proxy and database
-- SSH keys set up on your host machine (for git operations)
+- [Docker Desktop](https://www.docker.com/products/docker-desktop/) (or Docker Engine + Compose)
+- [Traefik Dockerized](https://github.com/LaTableRouge/dockerized) running — provides the `traefik` network and MariaDB
+- SSH keys on the host if you commit from inside the container (`~/.ssh` is mounted; create that folder first or Docker will create an empty one)
 
-> **Note**: It's better to use the [Traefik Dockerized](https://github.com/LaTableRouge/dockerized) configuration which provides Traefik reverse proxy, MariaDB database, and other services in a unified setup.
+The `traefik` network is `external: true`. Compose will not start without it.
 
-## Quick Start
+## Disk layout (shared mode)
 
-1. **Create a `.env` file** in the root directory:
+Theme and plugin bind mounts are relative to the compose file. With this stack living in `WP-core/<site>/`, the defaults (`../../WP-themes`, `../../WP-plugins`) resolve like this:
 
-```env
-# Project Configuration
-PROJECT_NAME=myproject
-APP_FQDN=local.myproject.com
-
-# Git Configuration (optional, for git operations inside container)
-GIT_USER_NAME=Your Name
-GIT_USER_EMAIL=your.email@example.com
+```text
+WP-core/
+└── my-site/                 # WordPress core + this compose file
+WP-themes/
+└── my-theme/                # THEME_NAME=my-theme
+WP-plugins/
+└── my-plugin/               # optional bind mount
 ```
 
-2. **Build and start the containers**:
+## Quick start
+
+1. Copy environment defaults:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Edit `.env`: `PROJECT_NAME` and `APP_FQDN`. For a shared theme, also set `THEME_NAME` and `THEME_PATH=../../WP-themes`.
+
+3. Add the hostname:
+
+   ```text
+   # /etc/hosts (macOS/Linux) or C:\Windows\System32\drivers\etc\hosts
+   127.0.0.1 local.my-site.com
+   ```
+
+4. Build and start:
+
+   ```bash
+   docker compose build
+   docker compose up -d
+   ```
+
+   First start can take a minute if WordPress has to be downloaded.
+
+5. Open `http://local.my-site.com` (or your `APP_FQDN`).
+
+Admin: `http://local.my-site.com/wp-admin`.
+
+Docker-only steps (Sequel Ace, logs, WP-CLI) are in [`docker/README.md`](docker/README.md).
+
+## First-start WordPress download
+
+The entrypoint looks for `/app/wp-load.php` and `/app/wp-includes/version.php`. If both exist, nothing is fetched.
+
+Otherwise it downloads `wordpress-${WP_VERSION}.zip` (default `6.8.2`) and copies the `wordpress/` tree into the project directory with `cp -n` (no clobber). Set `WP_VERSION=latest` for the current release.
 
 ```bash
-docker compose build
-docker compose up -d
+WP_VERSION=6.8.2
+SKIP_WP_DOWNLOAD=1
 ```
 
-3. **Access your WordPress site**:
+A folder that already has WordPress core skips this step.
 
-Visit `http://local.myproject.com` (or your configured `APP_FQDN`)
+## Standalone mode
 
-## Using an External Theme
+Drop `docker/`, `docker-compose.yml`, and `.env` into a full WordPress project (or an empty folder and let the first start fetch core). The project root is mounted at `/app`.
 
-If your theme is located outside the WordPress installation:
+The entrypoint will:
 
-### Why This Structure?
+- download WordPress if core is missing
+- run `composer install` / `npm install` at the project root when those manifests exist
+- fix Husky hook permissions at the root
+- set up git-checkout plugins the same way as shared mode
 
-This setup is designed to use a **single WordPress instance for all your theme projects**. Only the theme changes between projects, while WordPress core, plugins, and additional themes are managed via Composer. This approach:
+Expose Vite with `VITE_PORT` (default `5173`) if two stacks would collide.
 
-- Keeps WordPress core clean and reusable
-- Allows easy switching between theme projects
-- Manages plugins and themes via Composer dependencies
-- Isolates project-specific configuration and uploads per theme
+## Shared mode
 
-### Theme Structure
+One WordPress core, one theme at a time. Core, Composer plugins, and extra themes stay in the core repo. Project-specific `wp-config.php` and `uploads/` live in the theme.
 
-Your external theme **must** include the following structure:
+In `.env`:
 
+```bash
+THEME_NAME=my-theme
+THEME_PATH=../../WP-themes
 ```
+
+If `THEME_NAME` is unset, compose mounts `docker/unused-theme` so it does not overlay `wp-content/themes`. `THEME_PATH` is the **parent** folder (`WP-themes`), not the theme folder itself.
+
+### Theme layout
+
+```text
 my-theme/
-├── wp-config.php          # WordPress configuration (project-specific)
-├── uploads/               # Media uploads directory (project-specific)
+├── wp-config.php     # required — see docker/conf/wp-config.sample.php
+├── uploads/          # required — media for this project
 ├── style.css
 ├── functions.php
-├── index.php
-├── package.json           # npm dependencies (optional)
-├── composer.json          # Composer dependencies (optional)
-└── ... (other theme files)
+├── package.json      # optional
+├── composer.json     # optional
+└── ...
 ```
 
-**Important**: The `wp-config.php` and `uploads/` directory must be in your theme root. The entrypoint script will automatically symlink them to the WordPress root.
+On start, the entrypoint:
 
-### Setup Steps
+- downloads WordPress if the core folder is empty
+- symlinks `wp-config.php` → `/app/wp-config.php` and `uploads/` → `/app/wp-content/uploads`
+- installs theme npm/Composer deps into named volumes
+- installs npm/Composer only for **git-checkout** plugins (bundled plugins are left alone)
+- fixes Husky permissions on the theme and on plugins
+- configures git if `GIT_USER_NAME` and `GIT_USER_EMAIL` are set
 
-1. **Set the theme name** in your `.env` file:
+Set `THEME_NAME` in `.env`. There is no auto-detect.
 
-```env
-THEME_NAME=my-theme
-```
+### wp-config conventions
 
-2. **Update the theme volume path** in `docker-compose.yml`:
+Use [`docker/conf/wp-config.sample.php`](docker/conf/wp-config.sample.php) as a starting point:
+
+- `DB_HOST` = `mariadb` (Traefik Dockerized service name)
+- `DB_USER` / `DB_PASSWORD` = `root` / `root`
+- `DB_NAME` = a database you create in MariaDB
+- generate new salts before first use
+
+### External plugins
+
+Uncomment a volume in `docker-compose.yml`:
 
 ```yaml
-volumes:
-  # Update this path to match your theme location
-  - ../../WP-themes/${THEME_NAME}:/app/wp-content/themes/${THEME_NAME}
+- ${PLUGIN_PATH:-../../WP-plugins}/my-plugin:/app/wp-content/plugins/my-plugin
 ```
 
-3. **The entrypoint script will automatically**:
-   - Detect your theme
-   - Create symlinks for `wp-config.php` and `uploads` directory
-   - Install npm dependencies (if `package.json` exists)
-   - Install Composer dependencies (if `composer.json` exists)
-   - Fix permissions for executables and husky hooks
+Use bind mounts for plugins you are developing. Install ordinary plugins with Composer (`wpackagist`) in the WordPress root.
 
-**Note**: Plugins and additional themes should be installed via Composer in your WordPress root `composer.json`, not as external volumes (unless they're custom/private plugins).
+Switch theme by changing `THEME_NAME` / `APP_FQDN` / `PROJECT_NAME` in `.env` and recreating the container.
 
-## Using an External Plugin
+## Xdebug
 
-External plugins are useful for **custom or private plugins** that you're actively developing. For standard WordPress plugins, it's recommended to install them via Composer in your WordPress root `composer.json`.
-
-### When to Use External Plugins
-
-- Custom plugins you're developing
-- Private plugins not available via Composer/Packagist
-- Plugins that need to be shared across multiple projects
-
-### Setup Steps
-
-1. **Add plugin volumes** to `docker-compose.yml`:
-
-```yaml
-volumes:
-  # Add your external plugins here
-  - ../../WP-plugins/my-plugin:/app/wp-content/plugins/my-plugin
-```
-
-2. **Restart the container**:
+Off by default (faster image). In `.env`:
 
 ```bash
-docker compose restart docker_app
+INSTALL_XDEBUG=true
+XDEBUG_MODE=develop,debug
 ```
 
-**Note**: Standard WordPress plugins should be installed via Composer using `wpackagist` or similar repositories to keep your WordPress installation clean and manageable.
+Then rebuild: `docker compose build`. IDE listens on port `9003`. `host.docker.internal` is set via `extra_hosts` so Linux works the same as Docker Desktop.
 
-## Common Commands
+Requests start the debugger only when triggered (`xdebug.start_with_request = trigger`).
 
-### Access Container
+## Common commands
 
 ```bash
 docker compose exec docker_app bash
+docker compose exec docker_app wp --info --allow-root
+docker compose exec docker_app wp plugin list --allow-root
+docker compose exec docker_app wp theme list --allow-root
 ```
 
-### WP-CLI
+Theme work (shared mode):
 
 ```bash
-docker compose exec docker_app wp --info
-docker compose exec docker_app wp plugin list
-docker compose exec docker_app wp theme list
-```
-
-### Theme Development
-
-```bash
-# Enter container and navigate to theme
 docker compose exec docker_app bash -c "cd /app/wp-content/themes/${THEME_NAME} && bash"
-
-# Install dependencies
 docker compose exec docker_app bash -c "cd /app/wp-content/themes/${THEME_NAME} && npm install"
-docker compose exec docker_app bash -c "cd /app/wp-content/themes/${THEME_NAME} && composer install"
-
-# Build assets
 docker compose exec docker_app bash -c "cd /app/wp-content/themes/${THEME_NAME} && npm run build"
 ```
 
-### Git Operations
-
-Git is configured to work inside the container. SSH keys are mounted from your host (`~/.ssh`).
+Git inside the container (`~/.ssh` is mounted):
 
 ```bash
-# Enter container and navigate to theme
-docker compose exec docker_app bash -c "cd /app/wp-content/themes/${THEME_NAME} && bash"
-
-# Then use git normally
-git status
-git add .
-git commit -m "Your commit message"
-git push
+docker compose exec docker_app bash -c "cd /app/wp-content/themes/${THEME_NAME} && git status"
 ```
 
-**Note**: Make sure `GIT_USER_NAME` and `GIT_USER_EMAIL` are set in your `.env` file for commits.
+Import a remote database, then rewrite URLs:
+
+```bash
+docker compose exec docker_app bash scripts/search-replace-db.sh
+docker compose exec docker_app bash scripts/search-replace-db.sh live
+```
+
+See [`scripts/README.md`](scripts/README.md).
 
 ## Features
 
-- **PHP 8.3** with Apache
-- **Node.js & npm** for frontend development
-- **Composer** for PHP dependencies
-- **WP-CLI** pre-installed
-- **Automatic theme integration** with symlinks
-- **Named volumes** for `node_modules` and `vendor` (fixes permission issues)
-- **Git support** with SSH key mounting
-- **Husky hooks** support for git workflows
-- **Traefik** integration for reverse proxy
+- PHP 8.3 + Apache, Node.js 24, Composer, WP-CLI
+- APCu and Imagick
+- Downloads WordPress on first start if the folder has no install
+- Vite port (`5173` by default)
+- Traefik labels (`APP_FQDN`)
+- Optional Xdebug (`INSTALL_XDEBUG` in `.env`)
+- Entrypoint: theme symlinks, root + theme + plugin deps, lockfile refresh, Husky, git
+- Named volumes for theme `node_modules` / `vendor` (avoids bind-mount permission issues)
 
-## Troubleshooting
+## Named volumes
 
-### Permission Issues
+Theme `node_modules` and `vendor` live in named volumes. The entrypoint runs `npm install` / `composer install` when the directory is empty or when `package-lock.json` / `composer.lock` is newer than the installed tree.
 
-If you encounter permission errors with npm/Composer:
+If deps look stuck:
 
 ```bash
 docker compose down -v
-docker compose build --no-cache
 docker compose up -d
 ```
 
-### Git SSH Issues
+`-v` deletes those volumes. You will reinstall theme dependencies on the next start.
 
-```bash
-# Verify SSH keys are mounted
-docker compose exec docker_app ls -la /root/.ssh
+## Troubleshooting
 
-# Test SSH connection
-docker compose exec docker_app ssh -T git@github.com
-```
+**WordPress was not downloaded** — check `docker compose logs docker_app` for the download URL. The container needs outbound HTTPS to wordpress.org. Restart after the network is back, or set `SKIP_WP_DOWNLOAD=1` and install core yourself.
 
-### Theme Not Detected
+**Theme not detected** — set `THEME_NAME` and `THEME_PATH` in `.env`. Check logs for `Using theme`.
 
-1. Set `THEME_NAME` explicitly in your `.env` file
-2. Verify the theme path in `docker-compose.yml` matches your actual theme location
-3. Check container logs: `docker compose logs docker_app | grep "Using theme"`
+**404** — Traefik Dockerized must be up, `APP_FQDN` must match `/etc/hosts`, and the `traefik` network must exist (`docker network ls`).
 
-### Container Won't Start
+**Database** — host `mariadb`, user `root`, password `root`. From the app container: `mysql -h mariadb -u root -proot -e "SHOW DATABASES;"`. Sequel Ace on the host uses port **3317** (see [`docker/README.md`](docker/README.md)).
 
-```bash
-# Check logs
-docker compose logs docker_app
+**Git SSH** — `docker compose exec docker_app ls -la /root/.ssh` then `ssh -T git@github.com`.
 
-# Verify Traefik network exists
-docker network ls | grep traefik
+**Vite / 5173 already allocated** — set `VITE_PORT` in `.env` to a free host port.
 
-# Rebuild
-docker compose build --no-cache
-docker compose up -d
-```
+**Permission errors with npm/Composer** — `docker compose down -v && docker compose build --no-cache && docker compose up -d`.
+
+**Container will not start** — `docker compose logs docker_app`. Confirm Traefik is running before `up`.
 
 ## Customization
 
-### PHP Configuration
+- PHP: `docker/conf/php.ini` then `docker compose restart docker_app`
+- Apache: `docker/conf/vhost.conf` or `docker/conf/apache.conf`, then restart
+- PHP version: change `FROM php:8.3-apache` in `docker/Dockerfile` and rebuild (`docker compose build --no-cache`)
 
-Edit `docker/conf/php.ini` and restart:
+## Project structure
 
-```bash
-docker compose restart docker_app
-```
-
-### Apache Configuration
-
-Edit `docker/conf/vhost.conf` or `docker/conf/apache.conf` and restart:
-
-```bash
-docker compose restart docker_app
-```
-
-### PHP Version
-
-Edit `docker/Dockerfile` and change the base image:
-
-```dockerfile
-FROM php:8.2-apache  # Change version here
-```
-
-Then rebuild:
-
-```bash
-docker compose build --no-cache
-docker compose up -d
-```
-
-## Project Structure
-
-```
+```text
 .
 ├── docker/
-│   ├── Dockerfile              # Main Docker image definition
+│   ├── Dockerfile
+│   ├── unused-theme/          # placeholder bind mount when THEME_NAME is unset
 │   ├── conf/
-│   │   ├── entrypoint.sh      # Container entrypoint script
-│   │   ├── php.ini            # PHP configuration
-│   │   ├── vhost.conf         # Apache virtual host
-│   │   └── apache.conf        # Apache configuration
-│   └── README.md              # Docker-specific documentation
-├── docker-compose.yml         # Docker Compose configuration
-├── .env                       # Environment variables (create this)
-└── README.md                  # This file
+│   │   ├── entrypoint.sh
+│   │   ├── php.ini
+│   │   ├── xdebug.ini
+│   │   ├── vhost.conf
+│   │   ├── apache.conf
+│   │   └── wp-config.sample.php
+│   └── README.md
+├── docker-compose.yml
+├── scripts/
+│   ├── search-replace-db.sh
+│   └── README.md
+├── .env.example
+└── README.md
 ```
 
 ## License
 
-This is a boilerplate template. Customize as needed for your project.
+Boilerplate template. Customize it for each project.

@@ -3,36 +3,49 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile
+      args:
+        INSTALL_XDEBUG: ${INSTALL_XDEBUG:-false}
     env_file: .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - .:/app
+      # Create ~/.ssh on the host first, or Docker makes an empty directory there
       - ~/.ssh:/root/.ssh:ro
       - ./docker/conf/php.ini:/usr/local/etc/php/conf.d/app.ini
+      - ./docker/conf/xdebug.ini:/usr/local/etc/php/conf.d/xdebug.ini
       - ./docker/conf/vhost.conf:/etc/apache2/sites-available/000-default.conf
       - ./docker/conf/apache.conf:/etc/apache2/conf-available/z-app.conf
-      # Themes
-      - ../../WP-themes/${THEME_NAME}:/app/wp-content/themes/${THEME_NAME}
-      # Plugins
-      - ../../WP-plugins/acf-barcodescanner:/app/wp-content/plugins/acf-barcodescanner
-      # Named volumes for dependencies (fixes permission issues)
-      - theme-node-modules:/app/wp-content/themes/${THEME_NAME}/node_modules
-      - theme-vendor:/app/wp-content/themes/${THEME_NAME}/vendor
+      # THEME_PATH = parent folder (WP-themes). From WP-core/<site>/ that is ../../WP-themes
+      - ${THEME_PATH:-./docker}/${THEME_NAME:-unused-theme}:/app/wp-content/themes/${THEME_NAME:-unused-theme}
+      # - ${PLUGIN_PATH:-../../WP-plugins}/my-plugin:/app/wp-content/plugins/my-plugin
+      - theme-node-modules:/app/wp-content/themes/${THEME_NAME:-unused-theme}/node_modules
+      - theme-vendor:/app/wp-content/themes/${THEME_NAME:-unused-theme}/vendor
     labels:
       - "traefik.http.routers.${PROJECT_NAME}.rule=Host(`${APP_FQDN}`)"
       - "traefik.http.routers.${PROJECT_NAME}.entrypoints=http"
       - "traefik.http.services.${PROJECT_NAME}.loadbalancer.server.port=80"
     environment:
-      - COMPOSER_ALLOW_SUPERUSER=1
-      - THEME_NAME=${THEME_NAME}
+      - THEME_NAME=${THEME_NAME:-}
       - GIT_USER_NAME=${GIT_USER_NAME:-}
       - GIT_USER_EMAIL=${GIT_USER_EMAIL:-}
+      - WP_VERSION=${WP_VERSION:-6.8.2}
+      - SKIP_WP_DOWNLOAD=${SKIP_WP_DOWNLOAD:-}
+      - XDEBUG_MODE=${XDEBUG_MODE:-off}
+      # Theme Vite configs already poll when these are set (bind mounts have no inotify)
+      - DOCKER=true
+      - VITE_DOCKER=true
+      - CHOKIDAR_USEPOLLING=true
+      - WATCHPACK_POLLING=true
+    ports:
+      - "${VITE_PORT:-5173}:5173"
     networks:
       - traefik
       - app-network
 
 volumes:
   theme-node-modules:
-  theme-vendor: # if composer is used
+  theme-vendor:
 
 networks:
   app-network:

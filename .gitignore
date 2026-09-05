@@ -1,0 +1,11 @@
+.env
+
+# WordPress core created on first container start
+/wp-admin/
+/wp-includes/
+/wp-content/
+/wp-*.php
+/index.php
+/xmlrpc.php
+/license.txt
+/readme.html
