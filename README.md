@@ -39,7 +39,7 @@ Everything is driven by `.env` — see [`.env.example`](.env.example).
 | `THEME_NAME`      | unset                 | Theme folder to mount. Unset means standalone mode                |
 | `THEME_PATH`      | `./docker`            | **Parent** folder holding the theme, not the theme folder itself   |
 | `PLUGIN_PATH`     | `../../WP-plugins`    | Parent folder for local plugin repos                              |
-| `WP_VERSION`      | `latest`              | Core version fetched on first start. Pin it to keep core stable    |
+| `WP_VERSION`      | `6.8.2`               | Core version fetched on first start. `latest` for the newest       |
 | `SKIP_WP_DOWNLOAD`| unset                 | Set to `1` to never download core                                 |
 | `INSTALL_XDEBUG`  | `false`               | Bakes Xdebug into the image — **requires a rebuild**              |
 | `XDEBUG_MODE`     | `off`                 | e.g. `develop,debug`. Applied on restart                          |
@@ -80,7 +80,7 @@ WP-plugins/
 
 Switch project by changing `PROJECT_NAME` / `THEME_NAME` / `APP_FQDN` in `.env` and recreating the container. If `THEME_NAME` is unset, Compose mounts `docker/unused-theme` so it does not overlay `wp-content/themes`.
 
-> The entrypoint can fall back to the first non-default theme it finds and will warn about it. Always set `THEME_NAME` explicitly.
+> Set `THEME_NAME` in `.env`. There is no auto-detect: an unset value means standalone mode.
 
 ### wp-config conventions
 
@@ -104,11 +104,9 @@ Drop `docker/`, `docker-compose.yml`, and `.env` into a full WordPress project, 
 
 ## Dependencies and disk usage
 
-Theme `node_modules` and `vendor` live in named volumes, which avoids bind-mount permission issues.
+Theme `node_modules` and `vendor` live in named volumes, which avoids bind-mount permission issues. The entrypoint installs into them when they are empty or when a lockfile is newer than the installed tree.
 
-On `down`, `stop`, and `restart`, the Compose `pre_stop` hook runs [`docker/conf/cleanup-deps.sh`](docker/conf/cleanup-deps.sh): it empties those volumes, and for each git checkout in `/local-plugins` removes `node_modules` and `vendor` **only when git ignores them** (some plugins commit `vendor/` and need it to run). The entrypoint reinstalls everything on the next start, so stopped projects cost install time instead of permanent disk space.
-
-`pre_stop` needs Compose v2.30+. On older versions the hook is silently ignored and dependencies stay on disk.
+That adds up to well over a gigabyte per project. To reclaim it on a project you are putting away, run `cleanup-deps.sh` before stopping the container — see [`scripts/README.md`](scripts/README.md). The next start reinstalls everything.
 
 ## Xdebug
 
@@ -126,13 +124,29 @@ docker compose exec docker_app wp --info --allow-root
 
 # Theme work (shared mode)
 docker compose exec docker_app bash -c "cd /app/wp-content/themes/${THEME_NAME} && npm run build"
-
-# Rewrite URLs after importing a production database — see scripts/README.md
-docker compose exec docker_app bash scripts/search-replace-db.sh        # dry-run
-docker compose exec docker_app bash scripts/search-replace-db.sh live
 ```
 
+Two helper scripts cover rewriting URLs after a database import and freeing dependency disk space: [`scripts/README.md`](scripts/README.md).
+
 ## Troubleshooting
+
+<details>
+<summary><strong>Site returns 502 Bad Gateway</strong></summary>
+
+Traefik reaches the container but nothing listens on port 80 yet. Apache starts only after the entrypoint has installed every dependency, so a cold start serves 502 for as long as that takes — minutes on a first install. `docker compose logs -f docker_app` shows what it is working on; Apache is up once you see `resuming normal operations`.
+
+If it never gets there, the entrypoint is stuck or failing earlier in that log.
+</details>
+
+<details>
+<summary><strong>Pages take several seconds to render</strong></summary>
+
+WordPress makes loopback HTTP calls to its own `APP_FQDN` (wp-cron, Site Health). That name only exists in the *host's* `/etc/hosts`, so from inside the container it hits DNS and hangs. Compose maps it to `127.0.0.1` via `extra_hosts`; confirm with:
+
+```bash
+docker compose exec docker_app curl -s -o /dev/null -w '%{time_total}s\n' "http://${APP_FQDN}/"
+```
+</details>
 
 <details>
 <summary><strong>Site returns 404</strong></summary>
@@ -192,7 +206,7 @@ Check the mount with `docker compose exec docker_app ls -la /root/.ssh`, then `s
 - **Apache** — edit `docker/conf/vhost.conf` or `docker/conf/apache.conf`, then restart
 - **PHP version** — change `FROM php:8.3-apache` in `docker/Dockerfile`, then `docker compose build --no-cache`
 
-The three config files are baked into the image *and* bind-mounted by Compose, so edits apply on restart without a rebuild while the image still works standalone.
+These are bind-mounted by Compose, not baked into the image, so a restart is enough. `entrypoint.sh` *is* copied in, so changing it needs `docker compose build`.
 
 ## Project structure
 
@@ -203,7 +217,6 @@ The three config files are baked into the image *and* bind-mounted by Compose, s
 │   ├── unused-theme/            # placeholder mount when THEME_NAME is unset
 │   ├── conf/
 │   │   ├── entrypoint.sh        # runs on start
-│   │   ├── cleanup-deps.sh      # runs on stop (pre_stop hook)
 │   │   ├── php.ini
 │   │   ├── xdebug.ini
 │   │   ├── vhost.conf
@@ -211,6 +224,7 @@ The three config files are baked into the image *and* bind-mounted by Compose, s
 │   │   └── wp-config.sample.php
 │   └── README.md                # image internals, Sequel Ace
 ├── scripts/
+│   ├── cleanup-deps.sh          # frees dependency disk space on demand
 │   ├── search-replace-db.sh
 │   └── README.md
 ├── docker-compose.yml

@@ -95,12 +95,6 @@ setup_npm() {
 
     if [ -d "$bin_dir" ]; then
         find "$bin_dir" -type f -exec chmod +x {} \; 2>/dev/null || true
-
-        for bin_file in vite wp-scripts; do
-            if [ -f "$bin_dir/$bin_file" ] && [ ! -x "$bin_dir/$bin_file" ]; then
-                echo "⚠ Warning: $bin_file is not executable (chmod may not work on this filesystem)"
-            fi
-        done
     fi
 }
 
@@ -172,7 +166,7 @@ install_wordpress() {
         return 0
     fi
 
-    local version="${WP_VERSION:-latest}"
+    local version="${WP_VERSION:-6.8.2}"
     local url
     if [ "$version" = "latest" ]; then
         url="https://wordpress.org/latest.zip"
@@ -218,20 +212,7 @@ install_wordpress || echo "⚠ WordPress download failed — restart the contain
 
 prune_local_plugin_links
 
-# THEME_NAME is required for shared mode. Auto-detect is a last resort only.
-if [ -z "$THEME_NAME" ] && [ -d /app/wp-content/themes ]; then
-    for theme_dir in /app/wp-content/themes/*/; do
-        [ -d "$theme_dir" ] || continue
-        theme_name=$(basename "$theme_dir")
-        if [[ ! "$theme_name" =~ ^(twenty[a-z-]*|index\.php|\.unused|unused-theme)$ ]]; then
-            THEME_NAME="$theme_name"
-            echo "⚠ THEME_NAME was not set; auto-detected '$THEME_NAME'. Set THEME_NAME in .env to make this explicit."
-            break
-        fi
-    done
-fi
-
-if [ -n "$THEME_NAME" ] && [ "$THEME_NAME" != "unused-theme" ] && [ "$THEME_NAME" != ".unused" ]; then
+if [ -n "$THEME_NAME" ] && [ "$THEME_NAME" != "unused-theme" ]; then
     echo "Using theme: $THEME_NAME"
     THEME_DIR="/app/wp-content/themes/$THEME_NAME"
 

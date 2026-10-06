@@ -5,7 +5,6 @@ Modes, first-start WordPress download, theme layout, local plugin mounts, and Xd
 ## Scripts
 
 - `conf/entrypoint.sh` — runs on every start: WordPress download, theme symlinks, local plugin symlinks, npm/Composer installs, Husky permissions, git config.
-- `conf/cleanup-deps.sh` — runs on stop via the compose `pre_stop` hook: removes theme and local-plugin dependencies so stopped projects take no disk space.
 
 ## Sequel Ace → MariaDB
 

@@ -45,7 +45,6 @@ RUN docker-php-ext-configure gd --with-freetype --with-jpeg && \
     opcache \
     pdo_mysql \
     mysqli \
-    soap \
     zip \
     gd \
     intl \
@@ -69,15 +68,12 @@ ENV PATH="/root/.composer/vendor/bin:$PATH"
 
 RUN wp package install wp-cli/profile-command:@stable --allow-root
 
-# Baked in so the image works standalone; compose bind-mounts them on top
-# so edits apply after a restart instead of a rebuild.
-COPY docker/conf/php.ini /usr/local/etc/php/conf.d/app.ini
-COPY docker/conf/vhost.conf /etc/apache2/sites-available/000-default.conf
-COPY docker/conf/apache.conf /etc/apache2/conf-available/z-app.conf
 COPY docker/conf/entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY docker/conf/cleanup-deps.sh /usr/local/bin/cleanup-deps.sh
 
-RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/cleanup-deps.sh && \
+# php.ini / vhost / apache.conf are bind-mounted by compose.
+# Placeholder so a2enconf succeeds at build time.
+RUN chmod +x /usr/local/bin/entrypoint.sh && \
+    touch /etc/apache2/conf-available/z-app.conf && \
     a2enmod rewrite remoteip && \
     a2enconf z-app && \
     a2ensite 000-default
