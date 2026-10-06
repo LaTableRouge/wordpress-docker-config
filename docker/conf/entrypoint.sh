@@ -20,6 +20,54 @@ is_dir_empty() {
     [ ! -d "$dir" ] || [ -z "$(ls -A "$dir" 2>/dev/null)" ]
 }
 
+# Local plugin repos are mounted here and symlinked into wp-content/plugins.
+# Composer only unlinks symlinks, so a composer package with the same name can
+# never empty the mounted repo (it would if the repo were mounted in place).
+LOCAL_PLUGINS_DIR=/local-plugins
+WP_PLUGINS_DIR=/app/wp-content/plugins
+
+prune_local_plugin_links() {
+    for link in "$WP_PLUGINS_DIR"/*; do
+        [ -L "$link" ] || continue
+        case "$(readlink "$link")" in
+            "$LOCAL_PLUGINS_DIR"/*) ;;
+            *) continue ;;
+        esac
+        if [ ! -e "$link" ]; then
+            echo "Removing stale local plugin link: $link"
+            rm -f "$link"
+        fi
+    done
+}
+
+link_local_plugins() {
+    [ -d "$LOCAL_PLUGINS_DIR" ] || return 0
+    mkdir -p "$WP_PLUGINS_DIR"
+
+    for source in "$LOCAL_PLUGINS_DIR"/*/; do
+        [ -d "$source" ] || continue
+        source="${source%/}"
+        local name target
+        name=$(basename "$source")
+        target="$WP_PLUGINS_DIR/$name"
+
+        if [ -L "$target" ]; then
+            [ "$(readlink "$target")" = "$source" ] && continue
+            rm -f "$target"
+        elif [ -e "$target" ]; then
+            if mountpoint -q "$target" 2>/dev/null || [ -d "$target/.git" ]; then
+                echo "⚠ $target is a mount or git checkout — not replacing it with $source"
+                continue
+            fi
+            echo "Replacing $target with local repo $source"
+            rm -rf "$target"
+        fi
+
+        echo "Linking local plugin: $target -> $source"
+        ln -s "$source" "$target"
+    done
+}
+
 setup_npm() {
     local dir="$1"
     local label="${2:-project}"
@@ -35,7 +83,8 @@ setup_npm() {
 
     if is_dir_empty "$node_modules_dir"; then
         echo "Installing npm dependencies for $label..."
-        npm install
+        # A fresh install can run "prepare" (husky) before .bin links exist
+        npm install || { echo "npm install failed for $label — retrying once..."; npm install; }
     elif [ -f "$dir/package-lock.json" ] && [ -f "$node_modules_dir/.package-lock.json" ] \
         && [ "$dir/package-lock.json" -nt "$node_modules_dir/.package-lock.json" ]; then
         echo "package-lock.json is newer than node_modules for $label — updating..."
@@ -46,6 +95,12 @@ setup_npm() {
 
     if [ -d "$bin_dir" ]; then
         find "$bin_dir" -type f -exec chmod +x {} \; 2>/dev/null || true
+
+        for bin_file in vite wp-scripts; do
+            if [ -f "$bin_dir/$bin_file" ] && [ ! -x "$bin_dir/$bin_file" ]; then
+                echo "⚠ Warning: $bin_file is not executable (chmod may not work on this filesystem)"
+            fi
+        done
     fi
 }
 
@@ -117,7 +172,7 @@ install_wordpress() {
         return 0
     fi
 
-    local version="${WP_VERSION:-6.8.2}"
+    local version="${WP_VERSION:-latest}"
     local url
     if [ "$version" = "latest" ]; then
         url="https://wordpress.org/latest.zip"
@@ -161,7 +216,22 @@ install_wordpress() {
 
 install_wordpress || echo "⚠ WordPress download failed — restart the container when the network is available"
 
-if [ -n "$THEME_NAME" ] && [ "$THEME_NAME" != "unused-theme" ]; then
+prune_local_plugin_links
+
+# THEME_NAME is required for shared mode. Auto-detect is a last resort only.
+if [ -z "$THEME_NAME" ] && [ -d /app/wp-content/themes ]; then
+    for theme_dir in /app/wp-content/themes/*/; do
+        [ -d "$theme_dir" ] || continue
+        theme_name=$(basename "$theme_dir")
+        if [[ ! "$theme_name" =~ ^(twenty[a-z-]*|index\.php|\.unused|unused-theme)$ ]]; then
+            THEME_NAME="$theme_name"
+            echo "⚠ THEME_NAME was not set; auto-detected '$THEME_NAME'. Set THEME_NAME in .env to make this explicit."
+            break
+        fi
+    done
+fi
+
+if [ -n "$THEME_NAME" ] && [ "$THEME_NAME" != "unused-theme" ] && [ "$THEME_NAME" != ".unused" ]; then
     echo "Using theme: $THEME_NAME"
     THEME_DIR="/app/wp-content/themes/$THEME_NAME"
 
@@ -170,13 +240,16 @@ if [ -n "$THEME_NAME" ] && [ "$THEME_NAME" != "unused-theme" ]; then
     else
         create_symlink "$THEME_DIR/wp-config.php" "/app/wp-config.php" "wp-config.php"
         create_symlink "$THEME_DIR/uploads" "/app/wp-content/uploads" "uploads directory"
-        setup_project "$THEME_DIR" "theme"
+        setup_project "$THEME_DIR" "theme" || echo "⚠ Warning: dependency setup failed for theme"
     fi
 else
     echo "No THEME_NAME set — standalone mode (no theme symlinks)"
 fi
 
-setup_project /app "project root"
+setup_project /app "project root" || echo "⚠ Warning: dependency setup failed for project root"
+
+# After composer, so the links replace any copy composer just installed
+link_local_plugins
 
 if [ -d /app/wp-content/plugins ]; then
     for plugin_dir in /app/wp-content/plugins/*/; do

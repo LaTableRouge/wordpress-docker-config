@@ -18,18 +18,24 @@ services:
       - ./docker/conf/apache.conf:/etc/apache2/conf-available/z-app.conf
       # THEME_PATH = parent folder (WP-themes). From WP-core/<site>/ that is ../../WP-themes
       - ${THEME_PATH:-./docker}/${THEME_NAME:-unused-theme}:/app/wp-content/themes/${THEME_NAME:-unused-theme}
-      # - ${PLUGIN_PATH:-../../WP-plugins}/my-plugin:/app/wp-content/plugins/my-plugin
+      # Local plugin repos: mount under /local-plugins, never directly in wp-content/plugins.
+      # The entrypoint symlinks them in, so the theme's composer install can't wipe them.
+      # - ${PLUGIN_PATH:-../../WP-plugins}/my-plugin:/local-plugins/my-plugin
       - theme-node-modules:/app/wp-content/themes/${THEME_NAME:-unused-theme}/node_modules
       - theme-vendor:/app/wp-content/themes/${THEME_NAME:-unused-theme}/vendor
+    # Frees disk space on down/stop/restart; the entrypoint reinstalls deps on start
+    pre_stop:
+      - command: /usr/local/bin/cleanup-deps.sh
     labels:
       - "traefik.http.routers.${PROJECT_NAME}.rule=Host(`${APP_FQDN}`)"
       - "traefik.http.routers.${PROJECT_NAME}.entrypoints=http"
       - "traefik.http.services.${PROJECT_NAME}.loadbalancer.server.port=80"
     environment:
+      - COMPOSER_ALLOW_SUPERUSER=1
       - THEME_NAME=${THEME_NAME:-}
       - GIT_USER_NAME=${GIT_USER_NAME:-}
       - GIT_USER_EMAIL=${GIT_USER_EMAIL:-}
-      - WP_VERSION=${WP_VERSION:-6.8.2}
+      - WP_VERSION=${WP_VERSION:-latest}
       - SKIP_WP_DOWNLOAD=${SKIP_WP_DOWNLOAD:-}
       - XDEBUG_MODE=${XDEBUG_MODE:-off}
       # Theme Vite configs already poll when these are set (bind mounts have no inotify)
